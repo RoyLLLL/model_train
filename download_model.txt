@@ -1,0 +1,10 @@
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import os
+
+os.environ["HF_HOME"] = "D:\transformers\models"
+os.environ['HF_DATASETS_CACHE'] = 'D:/transformers/models/datasets_cache'
+
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3.5-mini-instruct", trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3.5-mini-instruct", trust_remote_code=True)

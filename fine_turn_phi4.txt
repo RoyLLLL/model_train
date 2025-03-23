@@ -1,0 +1,128 @@
+import os
+
+os.environ['HF_DATASETS_CACHE'] = 'D:/transformers/models/datasets_cache'
+os.environ['TRANSFORMERS_CACHE'] = 'D:/transformers/models'
+os.environ['HF_HOME'] = 'D:/transformers/models'
+
+from datasets import load_dataset
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TrainingArguments,
+    BitsAndBytesConfig,
+    DataCollatorForLanguageModeling
+)
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from trl import SFTTrainer
+import torch
+
+# 1. 加载并预处理数据
+dataset = load_dataset("banking77")
+train_dataset = dataset["train"]
+test_dataset = dataset["test"]
+
+# 验证标签名称获取方式
+label_names = train_dataset.features["label"].names
+
+
+model_name = "microsoft/Phi-4-mini-instruct"
+
+# 3. 优化模板设计
+template = """<|system|>
+You are an intent classification assistant. Determine the intent category for user inputs.<|end|>
+<|user|>
+Classify the following user input. Respond ONLY with the category name, no explanations:
+
+{text}<|end|>
+<|assistant|>
+{label}"""
+
+def format_sample(sample):
+    text = sample["text"]
+    label = label_names[sample["label"]]
+    return {
+        "text": template.format(
+            text=text,
+            label=label
+        )
+    }
+
+# 应用格式化
+formatted_train_dataset = train_dataset.map(format_sample)
+formatted_test_dataset = test_dataset.map(format_sample)
+
+# 4. 模型和分词器配置
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=bnb_config,
+    device_map="auto",
+    trust_remote_code=True
+)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token
+
+# 5. 准备PEFT模型
+model = prepare_model_for_kbit_training(model)
+
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=["self_attn.query", "self_attn.key", "self_attn.value", "ffn.output"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+model = get_peft_model(model, peft_config)
+
+# 6. 训练参数配置
+training_args = TrainingArguments(
+    output_dir="./phi-classification",
+    num_train_epochs=3,
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=4,
+    gradient_accumulation_steps=2,
+    evaluation_strategy="steps",
+    eval_steps=200,
+    logging_steps=50,
+    learning_rate=2e-5,
+    weight_decay=0.01,
+    fp16=True,
+    warmup_ratio=0.1,
+    save_strategy="steps",
+    save_steps=500,
+    load_best_model_at_end=True,
+    report_to="none"
+)
+
+# 7. 使用自定义数据收集器
+data_collator = DataCollatorForLanguageModeling(
+    tokenizer=tokenizer,
+    mlm=False
+)
+
+# 8. 初始化Trainer
+trainer = SFTTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=formatted_train_dataset,
+    eval_dataset=formatted_test_dataset,
+    dataset_text_field="text",
+    max_seq_length=512,
+    tokenizer=tokenizer,
+    data_collator=data_collator,
+    packing=True
+)
+
+# 9. 训练与评估
+trainer.train()
+trainer.evaluate()
+
+# 10. 保存完整模型
+model.save_pretrained("./phi-intent-classification")
+tokenizer.save_pretrained("./phi-intent-classification")

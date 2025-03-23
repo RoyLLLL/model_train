@@ -1,0 +1,83 @@
+from datasets import load_dataset
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
+from sklearn.metrics import accuracy_score
+import random
+import numpy as np
+import torch
+import os
+
+os.environ['HF_DATASETS_CACHE'] = 'D:/transformers/models/datasets_cache'
+os.environ['HF_HOME'] = 'D:/transformers/models'
+
+# 设置随机种子以确保可重复性
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+
+# 加载并分割数据集
+dataset = load_dataset("banking77")
+train_dataset = dataset["train"].train_test_split(test_size=0.1, seed=42)  # 分割10%作为验证集
+
+# 加载BERT分词器
+tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
+
+# 定义预处理函数
+def tokenize_function(examples):
+    return tokenizer(
+        examples["text"],
+        padding="max_length",
+        truncation=True,
+        max_length=128
+    )
+
+# 对数据集进行分词处理
+tokenized_train = train_dataset["train"].map(tokenize_function, batched=True)
+tokenized_val = train_dataset["test"].map(tokenize_function, batched=True)
+tokenized_test = dataset["test"].map(tokenize_function, batched=True)
+
+# 添加标签列（transformers库默认期望"labels"列名）
+tokenized_train = tokenized_train.rename_column("label", "labels")
+tokenized_val = tokenized_val.rename_column("label", "labels")
+tokenized_test = tokenized_test.rename_column("label", "labels")
+
+# 加载预训练模型
+model = BertForSequenceClassification.from_pretrained(
+    "google-bert/bert-base-uncased",
+    num_labels=77
+)
+
+# 修正后的训练参数
+training_args = TrainingArguments(
+    output_dir="./output/dir",
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    num_train_epochs=3,  # 修正拼写错误
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    learning_rate=2e-5,
+    weight_decay=0.01,
+    logging_dir="./log/dir",
+    load_best_model_at_end=True  # 可选：训练结束时加载最佳模型
+)
+
+# 修正后的评估函数
+def compute_metrics(p):
+    predictions = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+    preds = np.argmax(predictions, axis=1)
+    return {"accuracy": accuracy_score(p.label_ids, preds)}
+
+# 初始化Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_train,
+    eval_dataset=tokenized_val,
+    compute_metrics=compute_metrics,
+)
+
+# 开始训练
+trainer.train()
+
+# 在测试集上评估
+results = trainer.evaluate(tokenized_test)
+print(f"Final test results: {results}")
