@@ -1,0 +1,30 @@
+from typing import List
+from langchain_core.language_models.chat import BaseChatModel
+from langchain_core.messages import BaseMessage, HumanMessage
+import requests
+
+class VLLMChat(BaseChatModel):
+    def __init__(self, endpoint: str, model: str):
+        super().__init__()
+        self.endpoint = endpoint
+        self.model = model
+
+    def _generate(self, messages: List[BaseMessage], stop=None, run_manager=None, **kwargs):
+        payload = {
+            "model": self.model,
+            "messages": [{"role": m.type, "content": m.content} for m in messages],
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
+        resp = requests.post(self.endpoint, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return self._create_chat_result([data["choices"][0]["message"]])
+
+    @property
+    def _llm_type(self) -> str:
+        return "vllm-chat"
+
+# 用法
+llm = VLLMChat("http://localhost:8000/v1/chat/completions", "AI-NLP")
+response = llm.invoke([HumanMessage(content="介绍一下 LangChain 的用途")])
+print(response.content)
