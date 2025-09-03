@@ -1,15 +1,21 @@
+
+import evaluate
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+
+accuracy = evaluate.load("accuracy")
+f1 = evaluate.load("f1")
+
 def predict_and_evaluate(trainer, dataset):
-    trainer.model.eval()  # ✅ 切换评估模式
     texts = dataset["text"]
     labels = []
     preds = []
 
     for t in texts:
-        with torch.no_grad():  # ✅ 避免梯度计算，节省显存
-            output = trainer.model.generate(
-                tokenizer(t, return_tensors="pt").to(trainer.model.device)["input_ids"],
-                max_new_tokens=10,
-            )
+        output = trainer.model.generate(
+            tokenizer(t, return_tensors="pt").to(trainer.model.device)["input_ids"],
+            max_new_tokens=10,
+        )
         decoded = tokenizer.decode(output[0], skip_special_tokens=True)
 
         # 预测类别
@@ -38,3 +44,6 @@ def predict_and_evaluate(trainer, dataset):
     plt.show()
 
     return {"accuracy": acc["accuracy"], "f1_macro": f1_macro["f1"]}
+
+results = predict_and_evaluate(trainer, dataset["test"])
+print("Final test results:", results)
