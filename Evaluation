@@ -1,0 +1,40 @@
+def predict_and_evaluate(trainer, dataset):
+    trainer.model.eval()  # ✅ 切换评估模式
+    texts = dataset["text"]
+    labels = []
+    preds = []
+
+    for t in texts:
+        with torch.no_grad():  # ✅ 避免梯度计算，节省显存
+            output = trainer.model.generate(
+                tokenizer(t, return_tensors="pt").to(trainer.model.device)["input_ids"],
+                max_new_tokens=10,
+            )
+        decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+
+        # 预测类别
+        if "AI" in decoded:
+            preds.append(0)
+        elif "Nlp" in decoded:
+            preds.append(1)
+        else:
+            preds.append(-1)
+
+        # 真值类别
+        if "AI<im_end>" in t:
+            labels.append(0)
+        elif "Nlp<im_end>" in t:
+            labels.append(1)
+
+    # 计算指标
+    acc = accuracy.compute(predictions=preds, references=labels)
+    f1_macro = f1.compute(predictions=preds, references=labels, average="macro")
+
+    # 混淆矩阵
+    cm = confusion_matrix(labels, preds, labels=[0,1])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["AI","Nlp"])
+    disp.plot(cmap="Blues")
+    plt.title("Confusion Matrix on Test Set")
+    plt.show()
+
+    return {"accuracy": acc["accuracy"], "f1_macro": f1_macro["f1"]}
