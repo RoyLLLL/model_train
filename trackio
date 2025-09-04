@@ -1,0 +1,16 @@
+import trackio
+import random
+import time
+
+trackio.init(project="my_local_project", config={"epochs": 5, "lr": 0.001})
+
+for epoch in range(5):
+    train_loss = random.random()
+    val_loss = random.random() * 0.9
+    trackio.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+    time.sleep(0.2)
+
+trackio.finish()
+
+# 启动本地仪表板
+trackio.show(project="my_local_project")
