@@ -1,0 +1,155 @@
+import os
+import json
+import pandas as pd
+import torch
+from torch.nn import CrossEntropyLoss
+from sklearn.model_selection import train_test_split
+from datasets import Dataset
+from unsloth import FastLanguageModel
+from unsloth import SFTTrainer
+from transformers import TrainingArguments
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix, classification_report
+import matplotlib.pyplot as plt
+import seaborn as sns
+import trackio  # 本地 TrackIO
+
+# ========== Step 1: 读取数据 ==========
+with open("data.jsonl", "r", encoding="utf-8") as f:
+    data = [json.loads(line) for line in f]
+
+df = pd.DataFrame(data)
+
+# ========== Step 2: 格式化数据 ==========
+system_prompt = (
+    'You are a forex query category helper, you need to output the user input category, '
+    'the category must be obtained from a list, the category list is {"NLP", "AI"}'
+)
+
+def format_example(row):
+    return {
+        "prompt": f"{system_prompt}\n\nUser query: {row['question']}\nCategory:",
+        "completion": row["response"]
+    }
+
+df = df.apply(format_example, axis=1, result_type="expand")
+
+# ========== Step 3: 数据集切分 (分层保持 9:1) ==========
+train_df, temp_df = train_test_split(df, test_size=0.2, stratify=df["completion"], random_state=42)
+val_df, test_df = train_test_split(temp_df, test_size=0.5, stratify=temp_df["completion"], random_state=42)
+
+train_ds = Dataset.from_pandas(train_df)
+val_ds   = Dataset.from_pandas(val_df)
+test_ds  = Dataset.from_pandas(test_df)
+
+# ========== Step 4: 加载模型 ==========
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="Qwen/Qwen2-4B",
+    max_seq_length=512,
+    load_in_4bit=True,
+)
+
+# LoRA 配置
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16, target_modules=["q_proj", "v_proj"],
+    lora_alpha=32,
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+# ========== Step 5: 处理类别权重 ==========
+class_counts = train_df["completion"].value_counts().to_dict()
+total = sum(class_counts.values())
+weights = {label: total / count for label, count in class_counts.items()}
+
+# 映射类别到 id
+label2id = {"AI": 0, "NLP": 1}
+id2label = {v: k for k, v in label2id.items()}
+class_weights = torch.tensor([weights["AI"], weights["NLP"]], dtype=torch.float32).to("cuda")
+
+# ========== Step 6: 自定义 Trainer (加权 Loss + TrackIO logging) ==========
+track = trackio.init(project="qwen3_classifier", url="http://localhost:3000")
+
+class WeightedSFTTrainer(SFTTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits[:, -1, :]  # 只取最后一个 token 的预测
+
+        loss_fct = CrossEntropyLoss(weight=class_weights)
+        loss = loss_fct(logits, labels)
+
+        # log 到本地 trackio
+        track.log({"train_loss": loss.item()})
+
+        return (loss, outputs) if return_outputs else loss
+
+# ========== Step 7: 训练配置 ==========
+training_args = TrainingArguments(
+    output_dir="./model",
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    learning_rate=5e-5,
+    num_train_epochs=3,
+    logging_steps=50,
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
+    report_to="none",  # 禁止上传
+)
+
+trainer = WeightedSFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=train_ds,
+    eval_dataset=val_ds,
+    dataset_text_field="prompt",
+    max_seq_length=512,
+    args=training_args,
+)
+
+# ========== Step 8: 开始训练 ==========
+trainer.train()
+
+# ========== Step 9: 模型评估 ==========
+preds = []
+labels = []
+for row in test_df.to_dict(orient="records"):
+    inputs = tokenizer(
+        row["prompt"],
+        return_tensors="pt",
+    ).to("cuda")
+    outputs = model.generate(**inputs, max_new_tokens=5)
+    pred = tokenizer.decode(outputs[0], skip_special_tokens=True).split("Category:")[-1].strip()
+    preds.append(pred if pred in label2id else "AI")  # fallback
+    labels.append(row["completion"])
+
+# 指标计算
+acc = accuracy_score(labels, preds)
+prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average="weighted")
+
+metrics = {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
+print("Test metrics:", metrics)
+
+# log 到 trackio
+track.log(metrics)
+
+# ========== Step 10: 混淆矩阵 + 分类报告 ==========
+cm = confusion_matrix(labels, preds, labels=["AI", "NLP"])
+plt.figure(figsize=(6, 5))
+sns.heatmap(cm, annot=True, fmt="d", xticklabels=["AI", "NLP"], yticklabels=["AI", "NLP"], cmap="Blues")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title("Confusion Matrix")
+plt.savefig("confusion_matrix.png")
+plt.close()
+
+# 分类报告
+report = classification_report(labels, preds, target_names=["AI", "NLP"])
+with open("classification_report.txt", "w") as f:
+    f.write(report)
+
+print(report)
