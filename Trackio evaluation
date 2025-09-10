@@ -1,0 +1,41 @@
+import torch
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix, classification_report
+import trackio
+
+# ========== 1. 初始化 TrackIO ==========
+trackio.init(project="Ai-nlp")
+
+# ========== 2. 模型预测 ==========
+preds, labels = [], []
+for row in test_df.to_dict(orient="records"):
+    inputs = tokenizer(row["prompt"], return_tensors="pt").to(model.device)
+    outputs = model.generate(**inputs, max_new_tokens=5)
+    pred = tokenizer.decode(outputs[0], skip_special_tokens=True).split("Category:")[-1].strip()
+    preds.append(pred if pred in ["AI", "NLP"] else "AI")  # fallback 避免空值
+    labels.append(row["completion"])
+
+# ========== 3. 指标计算 ==========
+acc = accuracy_score(labels, preds)
+prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average="weighted")
+metrics = {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
+
+# 记录主要指标
+trackio.log(metrics)
+
+# ========== 4. 混淆矩阵 ==========
+cm = confusion_matrix(labels, preds, labels=["AI", "NLP"])
+# 保存为 python 原生 list（方便 JSON 化）
+cm_dict = {
+    "labels": ["AI", "NLP"],
+    "matrix": cm.tolist()
+}
+trackio.log({"confusion_matrix": cm_dict})
+
+# ========== 5. 分类报告 ==========
+report_txt = classification_report(labels, preds, target_names=["AI", "NLP"])
+trackio.log({"classification_report": report_txt})
+
+# ========== 6. 完成 ==========
+trackio.finish()
+print("✅ 评估完成，所有指标已写入 TrackIO (Ai-nlp 项目)。")
+
