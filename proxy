@@ -1,0 +1,145 @@
+# Azure AD 客户端凭据
+TENANT_ID=你的Azure租户ID
+CLIENT_ID=你的Azure客户端ID
+CLIENT_SECRET=你的Azure客户端Secret
+
+# Azure OpenAI 基础配置
+AZURE_OPENAI_ENDPOINT=https://your-openai-resource.openai.azure.com
+AZURE_OPENAI_DEPLOYMENT=gpt-4o-deploy
+AZURE_API_VERSION=2024-02-15-preview
+
+# 项目运行端口
+PORT=3001
+
+
+server.js：
+import express from "express";
+import axios from "axios";
+import dotenv from "dotenv";
+import msal from "@azure/msal-node";
+
+dotenv.config();
+
+const app = express();
+app.use(express.json());
+
+const {
+  TENANT_ID,
+  CLIENT_ID,
+  CLIENT_SECRET,
+  AZURE_OPENAI_ENDPOINT,
+  AZURE_OPENAI_DEPLOYMENT,
+  AZURE_API_VERSION
+} = process.env;
+
+const msalConfig = {
+  auth: {
+    clientId: CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${TENANT_ID}`,
+    clientSecret: CLIENT_SECRET,
+  }
+};
+
+const cca = new msal.ConfidentialClientApplication(msalConfig);
+
+let cachedToken = null;
+let tokenExpiry = 0;
+
+// 获取并缓存 Azure AD Token
+async function getAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedToken && tokenExpiry - now > 60) {
+    return cachedToken;
+  }
+  const result = await cca.acquireTokenByClientCredential({
+    scopes: ["https://cognitiveservices.azure.com/.default"],
+  });
+  if (!result.accessToken) {
+    throw new Error("Failed to acquire Azure AD token");
+  }
+  cachedToken = result.accessToken;
+  tokenExpiry = result.expiresOnUnixTimestamp;
+  return cachedToken;
+}
+
+async function proxyRequest(req, res, method, path) {
+  try {
+    const token = await getAccessToken();
+    const url = `${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/${path}?api-version=${AZURE_API_VERSION}`;
+
+    const response = await axios({
+      method,
+      url,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      data: req.body,
+    });
+
+    res.status(response.status).json(response.data);
+  } catch (error) {
+    console.error(error);
+    res.status(error.response?.status || 500).json(error.response?.data || { error: error.message });
+  }
+}
+
+// OpenAI 兼容路径代理
+app.post("/v1/chat/completions", (req, res) => {
+  proxyRequest(req, res, "post", "chat/completions");
+});
+
+app.post("/v1/embeddings", (req, res) => {
+  proxyRequest(req, res, "post", "embeddings");
+});
+
+app.get("/v1/models", (req, res) => {
+  proxyRequest(req, res, "get", "models");
+});
+
+// 其他路径
+app.all("*", (req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
+const port = process.env.PORT || 3001;
+app.listen(port, () => {
+  console.log(`Azure OpenAI proxy running at http://localhost:${port}`);
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---------------------
+node server.js
+
+curl -X POST http://localhost:3001/v1/chat/completions \
+-H "Content-Type: application/json" \
+-d '{"messages":[{"role":"system","content":"Hello"}]}'
+
+
+{
+  "provider": {
+    "azureproxy": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:3001",
+        "defaultQuery": {}
+      },
+      "models": {
+        "gpt-4o": { "name": "gpt-4o" }
+      }
+    }
+  },
+  "model": "azureproxy/gpt-4o"
+}
